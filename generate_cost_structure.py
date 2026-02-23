@@ -61,36 +61,44 @@ def generate_structure(rows, accurate_totals=None):
     data_end_dt = datetime.strptime(data_end, "%Y-%m-%d")
     cutoff_date = (data_end_dt - timedelta(days=30)).strftime("%Y-%m-%d")
 
-    # Aggregate by resource
+    # Aggregate by project + resource (so same-named resources in different projects stay separate)
     resources = {}
     for row in rows:
         resource_name = row.get("resource_name") or "_unknown_"
-        safe_name = sanitize_name(resource_name)
+        project_id = row.get("project_id") or "_unknown_project_"
+        # Key by project + resource to avoid merging across projects
+        key = f"{sanitize_name(project_id)}_{sanitize_name(resource_name)}" if resource_name == "_unknown_" else sanitize_name(resource_name)
         date = row.get("usage_date")
         cost = row.get("net_cost", 0)
+        service = row.get("service_name")
 
-        if safe_name not in resources:
-            resources[safe_name] = {
-                "resource_name": resource_name,
-                "project_id": row.get("project_id"),
+        if key not in resources:
+            resources[key] = {
+                "resource_name": resource_name if resource_name != "_unknown_" else f"_unknown_ ({project_id})",
+                "project_id": project_id,
                 "project_name": row.get("project_name"),
                 "categories": set(),
+                "category_costs": {},
                 "daily_costs": {},
                 "total_cost": 0,
                 "rolling_30d_cost": 0,
             }
 
-        if row.get("service_name"):
-            resources[safe_name]["categories"].add(row["service_name"])
+        if service:
+            resources[key]["categories"].add(service)
+            if service not in resources[key]["category_costs"]:
+                resources[key]["category_costs"][service] = 0
+            if date and date >= cutoff_date:
+                resources[key]["category_costs"][service] += cost
 
         if date:
-            if date not in resources[safe_name]["daily_costs"]:
-                resources[safe_name]["daily_costs"][date] = 0
-            resources[safe_name]["daily_costs"][date] += cost
+            if date not in resources[key]["daily_costs"]:
+                resources[key]["daily_costs"][date] = 0
+            resources[key]["daily_costs"][date] += cost
 
-        resources[safe_name]["total_cost"] += cost
+        resources[key]["total_cost"] += cost
         if date and date >= cutoff_date:
-            resources[safe_name]["rolling_30d_cost"] += cost
+            resources[key]["rolling_30d_cost"] += cost
 
     # Calculate unallocated costs
     if accurate_totals:
@@ -192,10 +200,10 @@ def generate_structure(rows, accurate_totals=None):
 
     by_category_totals = {}
     for safe_name, data in resources.items():
-        for cat in data["categories"]:
+        for cat, cat_cost in data.get("category_costs", {}).items():
             if cat not in by_category_totals:
                 by_category_totals[cat] = 0
-            by_category_totals[cat] += data["rolling_30d_cost"] / len(data["categories"]) if data["categories"] else 0
+            by_category_totals[cat] += cat_cost
 
     by_category_totals = {k: round(v, 2) for k, v in sorted(by_category_totals.items(), key=lambda x: -x[1])}
 
